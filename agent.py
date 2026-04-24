@@ -84,6 +84,8 @@ def commit_file_to_github(client: httpx.Client, data: dict, sha: str, message: s
 
 # ---------- Search ----------
 
+BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY", "")
+BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
 
 # Facebook URL patterns we want to catch
@@ -100,19 +102,47 @@ FB_EXCLUDE = [
 ]
 
 
+def brave_search(client: httpx.Client, query: str) -> list[str]:
+    """Search via Brave Search API. Returns extracted URLs."""
+    if not BRAVE_API_KEY:
+        return []
+    try:
+        resp = client.get(
+            BRAVE_ENDPOINT,
+            params={"q": query, "count": 20, "country": "us"},
+            headers={
+                "Accept": "application/json",
+                "X-Subscription-Token": BRAVE_API_KEY,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"  brave search error: {e}")
+        return []
+
+    urls = []
+    for result in data.get("web", {}).get("results", []):
+        url = result.get("url", "")
+        if url:
+            urls.append(url)
+    return urls
+
+
 def ddg_search(client: httpx.Client, query: str) -> list[str]:
-    """Return extracted result URLs for a query."""
+    """Fallback: scrape DDG HTML. Fragile — Brave API preferred."""
     try:
         resp = client.post(
             DDG_ENDPOINT,
             data={"q": query},
             headers=SEARCH_HEADERS,
-            timeout=20,
+            timeout=8,
             follow_redirects=True,
         )
         resp.raise_for_status()
     except Exception as e:
-        print(f"  search error: {e}")
+        print(f"  ddg search error: {e}")
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -121,7 +151,6 @@ def ddg_search(client: httpx.Client, query: str) -> list[str]:
         href = a.get("href", "")
         if not href:
             continue
-        # DDG wraps results in a redirect like /l/?uddg=<encoded>
         if href.startswith("//duckduckgo.com/l/") or href.startswith("/l/"):
             parsed = urlparse(href)
             qs = parse_qs(parsed.query)
@@ -130,6 +159,13 @@ def ddg_search(client: httpx.Client, query: str) -> list[str]:
                 continue
         links.append(href)
     return links
+
+
+def search(client: httpx.Client, query: str) -> list[str]:
+    """Primary search: Brave API if key set, otherwise DDG fallback."""
+    if BRAVE_API_KEY:
+        return brave_search(client, query)
+    return ddg_search(client, query)
 
 
 def extract_facebook_url(urls: list[str]) -> str | None:
@@ -160,14 +196,16 @@ def discover_for_club(client: httpx.Client, club: dict) -> dict:
     updates = {}
     for q in queries:
         print(f"  > {q}")
-        urls = ddg_search(client, q)
+        urls = search(client, q)
         fb = extract_facebook_url(urls)
         if fb:
             updates["fb"] = fb
             updates["activity"] = "Discovered via search — verify manually"
             print(f"    ✓ found: {fb}")
             return updates
-        time.sleep(1.5)  # Be polite between queries
+        # Only politeness-sleep if we actually got results back
+        if urls:
+            time.sleep(1.0)
     print("    ✗ no facebook.com URL found")
     return updates
 
@@ -180,6 +218,7 @@ def main() -> int:
     print(f"Started: {started_at}")
     print(f"Repo: {GITHUB_REPO} (branch: {BRANCH})")
     print(f"File: {FILE_PATH}")
+    print(f"Search backend: {'Brave API' if BRAVE_API_KEY else 'DuckDuckGo HTML (fallback)'}")
     print()
 
     with httpx.Client() as client:
@@ -188,6 +227,9 @@ def main() -> int:
 
         discovered = 0
         total_missing = 0
+        consecutive_empty = 0
+        skipped_after_circuit = 0
+        CIRCUIT_THRESHOLD = 4  # trip after this many consecutive empty results
 
         for club in data.get("clubs", []):
             if club.get("excluded"):
@@ -195,11 +237,23 @@ def main() -> int:
             if club.get("fb"):
                 continue
             total_missing += 1
+
+            if consecutive_empty >= CIRCUIT_THRESHOLD:
+                skipped_after_circuit += 1
+                continue
+
             print(f"\n[{club['id']}] {club['name']}")
             updates = discover_for_club(client, club)
             if updates:
                 club.update(updates)
                 discovered += 1
+                consecutive_empty = 0
+            else:
+                consecutive_empty += 1
+
+        if skipped_after_circuit:
+            print(f"\n⚠ Search backend appears blocked — skipped {skipped_after_circuit} schools after {CIRCUIT_THRESHOLD} consecutive failures.")
+            print(f"   Add BRAVE_API_KEY env var to unblock discovery.")
 
         print(f"\nDiscovered {discovered} of {total_missing} missing FB URLs.")
 
@@ -208,9 +262,13 @@ def main() -> int:
         data["meta"]["last_discovery_run"] = started_at
         data["meta"]["last_updated"] = started_at
         data["meta"]["version"] = data["meta"].get("version", 1) + 1
+        data["meta"]["last_run_discovered"] = discovered
+        data["meta"]["last_run_skipped_blocked"] = skipped_after_circuit
 
         if discovered > 0:
             message = f"discovery agent: found {discovered} new FB pages"
+        elif skipped_after_circuit:
+            message = f"discovery agent: search backend blocked ({skipped_after_circuit} skipped, needs BRAVE_API_KEY)"
         else:
             message = f"discovery agent: refresh run ({total_missing} still pending)"
 
