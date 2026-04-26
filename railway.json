@@ -4,7 +4,8 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python agent.py",
-    "restartPolicyType": "NEVER"
+    "startCommand": "python enrich.py",
+    "restartPolicyType": "NEVER",
+    "cronSchedule": "0 7 * * 0"
   }
 }
