@@ -6,6 +6,6 @@
   "deploy": {
     "startCommand": "python enrich.py",
     "restartPolicyType": "NEVER",
-    "cronSchedule": "30 3 * * *"
+    "cronSchedule": "0 7 * * 0"
   }
 }

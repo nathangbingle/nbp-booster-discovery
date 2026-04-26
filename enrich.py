@@ -166,7 +166,7 @@ def enrich_club(client: anthropic.Anthropic, club: dict) -> dict | None:
             model=MODEL,
             max_tokens=1500,
             system=SYSTEM_PROMPT,
-            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
             messages=[{"role": "user", "content": user_msg}],
         )
     except anthropic.APIError as e:
@@ -348,8 +348,10 @@ def main():
         else:
             log.info("[%s] No new data found", club["id"])
 
-        # Rate-limit politeness between API calls
-        time.sleep(2)
+        # Rate-limit politeness between API calls.
+        # web_search results push input-token usage up fast — at 50K input tokens/min
+        # we need ~7-10s between calls to stay under the limit comfortably.
+        time.sleep(8)
 
     # Update meta
     data["meta"]["last_updated"] = datetime.now(timezone.utc).isoformat()
